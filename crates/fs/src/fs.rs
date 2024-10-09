@@ -171,6 +171,7 @@ pub struct Metadata {
     pub mtime: SystemTime,
     pub is_symlink: bool,
     pub is_dir: bool,
+    pub len: u64,
     pub is_fifo: bool,
 }
 
@@ -497,6 +498,7 @@ impl Fs for RealFs {
         Ok(Some(Metadata {
             inode,
             mtime: metadata.modified().unwrap(),
+            len: metadata.len(),
             is_symlink,
             is_dir: metadata.file_type().is_dir(),
             is_fifo,
@@ -585,44 +587,68 @@ impl Fs for RealFs {
         let pending_paths: Arc<Mutex<Vec<PathEvent>>> = Default::default();
         let root_path = path.to_path_buf();
 
-        watcher::global(|g| {
-            let tx = tx.clone();
-            let pending_paths = pending_paths.clone();
-            g.add(move |event: &notify::Event| {
-                let kind = match event.kind {
-                    EventKind::Create(_) => Some(PathEventKind::Created),
-                    EventKind::Modify(_) => Some(PathEventKind::Changed),
-                    EventKind::Remove(_) => Some(PathEventKind::Removed),
-                    _ => None,
-                };
-                let mut paths = event
-                    .paths
-                    .iter()
-                    .filter_map(|path| {
-                        path.starts_with(&root_path).then(|| PathEvent {
-                            path: path.clone(),
-                            kind,
-                        })
-                    })
-                    .collect::<Vec<_>>();
+        // Check if root path is a symlink
+        let target_path = self.read_link(&path).await.ok();
 
-                if !paths.is_empty() {
-                    paths.sort();
-                    let mut pending_paths = pending_paths.lock();
-                    if pending_paths.is_empty() {
-                        tx.try_send(()).ok();
+        watcher::global({
+            let target_path = target_path.clone();
+            |g| {
+                let tx = tx.clone();
+                let pending_paths = pending_paths.clone();
+                g.add(move |event: &notify::Event| {
+                    let kind = match event.kind {
+                        EventKind::Create(_) => Some(PathEventKind::Created),
+                        EventKind::Modify(_) => Some(PathEventKind::Changed),
+                        EventKind::Remove(_) => Some(PathEventKind::Removed),
+                        _ => None,
+                    };
+                    let mut paths = event
+                        .paths
+                        .iter()
+                        .filter_map(|path| {
+                            if let Some(target) = target_path.clone() {
+                                if path.starts_with(target) {
+                                    return Some(PathEvent {
+                                        path: path.clone(),
+                                        kind,
+                                    });
+                                }
+                            } else if path.starts_with(&root_path) {
+                                return Some(PathEvent {
+                                    path: path.clone(),
+                                    kind,
+                                });
+                            }
+                            None
+                        })
+                        .collect::<Vec<_>>();
+
+                    if !paths.is_empty() {
+                        paths.sort();
+                        let mut pending_paths = pending_paths.lock();
+                        if pending_paths.is_empty() {
+                            tx.try_send(()).ok();
+                        }
+                        util::extend_sorted(&mut *pending_paths, paths, usize::MAX, |a, b| {
+                            a.path.cmp(&b.path)
+                        });
                     }
-                    util::extend_sorted(&mut *pending_paths, paths, usize::MAX, |a, b| {
-                        a.path.cmp(&b.path)
-                    });
-                }
-            })
+                })
+            }
         })
         .log_err();
 
         let watcher = Arc::new(RealWatcher {});
 
         watcher.add(path).ok(); // Ignore "file doesn't exist error" and rely on parent watcher.
+
+        // Check if path is a symlink and follow the target parent
+        if let Some(target) = target_path {
+            watcher.add(&target).ok();
+            if let Some(parent) = target.parent() {
+                watcher.add(parent).log_err();
+            }
+        }
 
         // watch the parent dir so we can tell when settings.json is created
         if let Some(parent) = path.parent() {
@@ -800,11 +826,13 @@ enum FakeFsEntry {
     File {
         inode: u64,
         mtime: SystemTime,
+        len: u64,
         content: Vec<u8>,
     },
     Dir {
         inode: u64,
         mtime: SystemTime,
+        len: u64,
         entries: BTreeMap<String, Arc<Mutex<FakeFsEntry>>>,
         git_repo_state: Option<Arc<Mutex<git::repository::FakeGitRepositoryState>>>,
     },
@@ -935,6 +963,7 @@ impl FakeFs {
                 root: Arc::new(Mutex::new(FakeFsEntry::Dir {
                     inode: 0,
                     mtime: SystemTime::UNIX_EPOCH,
+                    len: 0,
                     entries: Default::default(),
                     git_repo_state: None,
                 })),
@@ -969,6 +998,7 @@ impl FakeFs {
                             inode: new_inode,
                             mtime: new_mtime,
                             content: Vec::new(),
+                            len: 0,
                         })));
                     }
                     btree_map::Entry::Occupied(mut e) => match &mut *e.get_mut().lock() {
@@ -1016,6 +1046,7 @@ impl FakeFs {
         let file = Arc::new(Mutex::new(FakeFsEntry::File {
             inode,
             mtime,
+            len: content.len() as u64,
             content,
         }));
         let mut kind = None;
@@ -1369,6 +1400,7 @@ impl Fs for FakeFs {
                     Arc::new(Mutex::new(FakeFsEntry::Dir {
                         inode,
                         mtime,
+                        len: 0,
                         entries: Default::default(),
                         git_repo_state: None,
                     }))
@@ -1391,6 +1423,7 @@ impl Fs for FakeFs {
         let file = Arc::new(Mutex::new(FakeFsEntry::File {
             inode,
             mtime,
+            len: 0,
             content: Vec::new(),
         }));
         let mut kind = Some(PathEventKind::Created);
@@ -1539,6 +1572,7 @@ impl Fs for FakeFs {
                 e.insert(Arc::new(Mutex::new(FakeFsEntry::File {
                     inode,
                     mtime,
+                    len: content.len() as u64,
                     content: Vec::new(),
                 })))
                 .clone(),
@@ -1694,16 +1728,22 @@ impl Fs for FakeFs {
 
             let entry = entry.lock();
             Ok(Some(match &*entry {
-                FakeFsEntry::File { inode, mtime, .. } => Metadata {
+                FakeFsEntry::File {
+                    inode, mtime, len, ..
+                } => Metadata {
                     inode: *inode,
                     mtime: *mtime,
+                    len: *len,
                     is_dir: false,
                     is_symlink,
                     is_fifo: false,
                 },
-                FakeFsEntry::Dir { inode, mtime, .. } => Metadata {
+                FakeFsEntry::Dir {
+                    inode, mtime, len, ..
+                } => Metadata {
                     inode: *inode,
                     mtime: *mtime,
+                    len: *len,
                     is_dir: true,
                     is_symlink,
                     is_fifo: false,

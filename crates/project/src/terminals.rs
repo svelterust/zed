@@ -67,8 +67,12 @@ impl Project {
     }
 
     fn ssh_command(&self, cx: &AppContext) -> Option<SshCommand> {
-        if let Some(ssh_session) = self.ssh_session.as_ref() {
-            return Some(SshCommand::Direct(ssh_session.ssh_args()));
+        if let Some(args) = self
+            .ssh_client
+            .as_ref()
+            .and_then(|session| session.read(cx).ssh_args())
+        {
+            return Some(SshCommand::Direct(args));
         }
 
         let dev_server_project_id = self.dev_server_project_id()?;
@@ -215,7 +219,7 @@ impl Project {
             spawn_task,
             shell,
             env,
-            Some(settings.blinking),
+            settings.cursor_shape.unwrap_or_default(),
             settings.alternate_scroll,
             settings.max_scroll_history_lines,
             window,
@@ -259,12 +263,16 @@ impl Project {
         cx: &AppContext,
     ) -> Option<PathBuf> {
         let venv_settings = settings.detect_venv.as_option()?;
+        let bin_dir_name = match std::env::consts::OS {
+            "windows" => "Scripts",
+            _ => "bin",
+        };
         venv_settings
             .directories
             .iter()
             .map(|virtual_environment_name| abs_path.join(virtual_environment_name))
             .find(|venv_path| {
-                let bin_path = venv_path.join("bin");
+                let bin_path = venv_path.join(bin_dir_name);
                 self.find_worktree(&bin_path, cx)
                     .and_then(|(worktree, relative_path)| {
                         worktree.read(cx).entry_for_path(&relative_path)
@@ -279,23 +287,36 @@ impl Project {
         settings: &TerminalSettings,
     ) -> Option<String> {
         let venv_settings = settings.detect_venv.as_option()?;
+        let activate_keyword = match venv_settings.activate_script {
+            terminal_settings::ActivateScript::Default => match std::env::consts::OS {
+                "windows" => ".",
+                _ => "source",
+            },
+            terminal_settings::ActivateScript::Nushell => "overlay use",
+            terminal_settings::ActivateScript::PowerShell => ".",
+            _ => "source",
+        };
         let activate_script_name = match venv_settings.activate_script {
             terminal_settings::ActivateScript::Default => "activate",
             terminal_settings::ActivateScript::Csh => "activate.csh",
             terminal_settings::ActivateScript::Fish => "activate.fish",
             terminal_settings::ActivateScript::Nushell => "activate.nu",
+            terminal_settings::ActivateScript::PowerShell => "activate.ps1",
         };
         let path = venv_base_directory
-            .join("bin")
+            .join(match std::env::consts::OS {
+                "windows" => "Scripts",
+                _ => "bin",
+            })
             .join(activate_script_name)
             .to_string_lossy()
             .to_string();
         let quoted = shlex::try_quote(&path).ok()?;
-
-        Some(match venv_settings.activate_script {
-            terminal_settings::ActivateScript::Nushell => format!("overlay use {}\n", quoted),
-            _ => format!("source {}\n", quoted),
-        })
+        let line_ending = match std::env::consts::OS {
+            "windows" => "\r",
+            _ => "\n",
+        };
+        Some(format!("{} {}{}", activate_keyword, quoted, line_ending))
     }
 
     fn activate_python_virtual_environment(
