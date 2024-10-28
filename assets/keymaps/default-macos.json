@@ -349,7 +349,15 @@
       "alt-cmd-]": "editor::UnfoldLines",
       "cmd-k cmd-l": "editor::ToggleFold",
       "cmd-k cmd-[": "editor::FoldRecursive",
-      "cmd-k cmd-]": "editor::UnfoldRecursive",
+      "cmd-k cmd-1": ["editor::FoldAtLevel", { "level": 1 }],
+      "cmd-k cmd-2": ["editor::FoldAtLevel", { "level": 2 }],
+      "cmd-k cmd-3": ["editor::FoldAtLevel", { "level": 3 }],
+      "cmd-k cmd-4": ["editor::FoldAtLevel", { "level": 4 }],
+      "cmd-k cmd-5": ["editor::FoldAtLevel", { "level": 5 }],
+      "cmd-k cmd-6": ["editor::FoldAtLevel", { "level": 6 }],
+      "cmd-k cmd-7": ["editor::FoldAtLevel", { "level": 7 }],
+      "cmd-k cmd-8": ["editor::FoldAtLevel", { "level": 8 }],
+      "cmd-k cmd-9": ["editor::FoldAtLevel", { "level": 9 }],
       "cmd-k cmd-0": "editor::FoldAll",
       "cmd-k cmd-j": "editor::UnfoldAll",
       "ctrl-space": "editor::ShowCompletions",
@@ -395,6 +403,7 @@
       // Change the default action on `menu::Confirm` by setting the parameter
       // "alt-cmd-o": ["projects::OpenRecent", {"create_new_window": true }],
       "alt-cmd-o": "projects::OpenRecent",
+      "ctrl-cmd-o": "projects::OpenRemote",
       "alt-cmd-b": "branches::OpenRecent",
       "ctrl-~": "workspace::NewTerminal",
       "cmd-s": "workspace::Save",
@@ -538,6 +547,13 @@
     }
   },
   {
+    "context": "ProposedChangesEditor",
+    "bindings": {
+      "cmd-shift-y": "editor::ApplyDiffHunk",
+      "cmd-shift-a": "editor::ApplyAllDiffHunks"
+    }
+  },
+  {
     "context": "PromptEditor",
     "bindings": {
       "ctrl-[": "assistant::CyclePreviousInlineAssist",
@@ -678,7 +694,8 @@
       "cmd-home": "terminal::ScrollToTop",
       "cmd-end": "terminal::ScrollToBottom",
       "shift-home": "terminal::ScrollToTop",
-      "shift-end": "terminal::ScrollToBottom"
+      "shift-end": "terminal::ScrollToBottom",
+      "ctrl-shift-space": "terminal::ToggleViMode"
     }
   }
 ]
